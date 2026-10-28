@@ -1,0 +1,273 @@
+# =============================================================================
+# MRU-Forecast — central configuration
+# Single source of truth for paths, target semantics, features, models and
+# evaluation settings.  Secrets never live here — they live in `.env`.
+# =============================================================================
+
+project:
+  name: mru-forecast
+  version: "0.1.0"
+  random_seed: 42
+  timezone: UTC
+
+# -----------------------------------------------------------------------------
+# Paths — all relative to the repository root
+# -----------------------------------------------------------------------------
+paths:
+  data_raw: data/raw
+  data_interim: data/interim
+  data_processed: data/processed
+  data_external: data/external
+  figures: docs/figures
+  models: models
+  reports: reports
+
+# -----------------------------------------------------------------------------
+# Target definition — the contract of the project (see docs/DATA_SOURCES.md)
+#
+#   USD/MRU = number of MRU required to buy 1 USD
+#   EUR/MRU = number of MRU required to buy 1 EUR
+#
+# `rate_type` is INDICATIVE MID-MARKET, sourced from a market data provider.
+# It is NOT the official rate published by the Banque Centrale de Mauritanie,
+# and the two can differ.  EUR/MRU is a DERIVED CROSS, not an observed quote.
+# -----------------------------------------------------------------------------
+targets:
+  - name: USD_MRU
+    base_currency: USD
+    quote_currency: MRU
+    definition: "MRU per 1 USD"
+    rate_type: indicative_mid_market
+    source: "Yahoo Finance chart API, symbol MRU=X"
+    observed: true
+    frequency: business_day
+  - name: EUR_MRU
+    base_currency: EUR
+    quote_currency: MRU
+    definition: "MRU per 1 EUR"
+    rate_type: indicative_mid_market_derived
+    source: "Derived cross: USD_MRU x EUR_USD"
+    observed: false
+    frequency: business_day
+
+auxiliary:
+  - name: EUR_USD
+    definition: "USD per 1 EUR"
+    enabled: true
+  - name: BRENT_OIL
+    definition: "Brent crude futures, USD per barrel"
+    enabled: true
+  - name: GOLD
+    definition: "Gold futures, USD per troy ounce"
+    enabled: true
+
+# -----------------------------------------------------------------------------
+# Data ingestion (Phase 2)
+#
+# Provider choice: Yahoo Finance's public chart endpoint is the only source
+# found that publishes a daily MRU series with multi-year history and requires
+# no API key.  Its `close` field is demonstrably unreliable for this symbol
+# (isolated values such as 2.00 MRU/USD against an open of 36.55), so the daily
+# representative value is the MEDIAN OF THE FOUR OHLC FIELDS — robust to any
+# single corrupted field.  A second, independent source (currency-api on
+# jsDelivr) is sampled to verify the level.
+# -----------------------------------------------------------------------------
+ingestion:
+  start_date: "2015-01-01"
+  end_date: null            # null = today
+  request_timeout_s: 30
+  max_retries: 3
+  cache_raw: true
+
+  series:
+    - name: USD_MRU
+      provider: yahoo
+      symbol: "MRU=X"
+      definition: "MRU per 1 USD"
+      rate_type: indicative_mid_market
+      source_url: "https://finance.yahoo.com/quote/MRU=X"
+      role: target
+    - name: EUR_USD
+      provider: yahoo
+      symbol: "EURUSD=X"
+      definition: "USD per 1 EUR"
+      rate_type: indicative_mid_market
+      source_url: "https://finance.yahoo.com/quote/EURUSD=X"
+      role: auxiliary
+    - name: BRENT_OIL
+      provider: yahoo
+      symbol: "BZ=F"
+      definition: "Brent crude futures, USD per barrel"
+      rate_type: futures_settlement
+      source_url: "https://finance.yahoo.com/quote/BZ=F"
+      role: auxiliary
+    - name: GOLD
+      provider: yahoo
+      symbol: "GC=F"
+      definition: "Gold futures, USD per troy ounce"
+      rate_type: futures_settlement
+      source_url: "https://finance.yahoo.com/quote/GC=F"
+      role: auxiliary
+    # Derived last: depends on the two series above.
+    - name: EUR_MRU
+      provider: derived
+      definition: "MRU per 1 EUR"
+      rate_type: indicative_mid_market_derived
+      source_url: "derived"
+      role: target
+      derived_from: [USD_MRU, EUR_USD]
+
+  cross_check:
+    enabled: true
+    provider: currency_api
+    earliest_date: "2024-03-05"   # first dated release available on the CDN
+    sample_size: 16
+    tolerance_pct: 2.0
+
+# -----------------------------------------------------------------------------
+# Cleaning & validation rules (Phase 3)
+#
+# `plausible_range` is a hard guard per series.  `spike_reversion_pct` drives
+# the isolated-bad-tick detector: a point is a bad tick only if it deviates from
+# BOTH neighbours by more than the threshold IN THE SAME DIRECTION.  A genuine
+# step devaluation deviates from the previous point but not from the next one,
+# so it survives — which is the whole point.
+# -----------------------------------------------------------------------------
+validation:
+  require_unique_dates: true
+  require_sorted_dates: true
+  min_rate: 0.0
+  max_daily_pct_change: 5.0       # flagged and reported, never silently dropped
+  max_consecutive_missing_days: 10
+  min_observations: 500
+  plausible_range:
+    USD_MRU: [10.0, 120.0]
+    EUR_MRU: [10.0, 150.0]
+    EUR_USD: [0.5, 2.0]
+    BRENT_OIL: [5.0, 400.0]
+    GOLD: [200.0, 10000.0]
+
+cleaning:
+  calendar: business_day          # business_day | calendar_day
+  spike_reversion_pct: 4.0        # isolated bad-tick threshold
+  spike_max_passes: 3             # re-run the detector so corrupted runs are fully caught
+  rolling_median_window: 21       # secondary Hampel-style guard
+  rolling_median_tol_pct: 12.0    # generous: must not fire on real step moves
+  fill_method: ffill              # carry the last observation over closed days
+  max_ffill_days: 10
+  drop_duplicates: keep_last
+  min_coverage_pct: 60.0          # a series below this on the target calendar is dropped
+
+# -----------------------------------------------------------------------------
+# Feature engineering (Phase 5). Every feature must be computable at time t from
+# information available strictly up to t — enforced by tests.
+# -----------------------------------------------------------------------------
+features:
+  lags: [1, 2, 3, 5, 7, 10, 14, 21, 30]
+  rolling_means: [7, 14, 30]
+  rolling_stds: [7, 30]
+  calendar: [day_of_week, day_of_month, week, month, quarter, year]
+  returns: [pct_change, log_return]
+  momentum_windows: [7, 30]
+  include_auxiliary: [EUR_USD, BRENT_OIL, GOLD]
+  auxiliary_lags: [1, 5, 21]
+
+# -----------------------------------------------------------------------------
+# Forecasting horizons, in business days
+# -----------------------------------------------------------------------------
+horizons: [1, 7, 30]
+
+# -----------------------------------------------------------------------------
+# Models (Phases 6-8)
+# -----------------------------------------------------------------------------
+models:
+  baseline:
+    naive: true
+    seasonal_naive:
+      season_length: 5            # one business week
+    drift: true
+
+  xgboost:
+    strategy: direct              # one model per horizon: no error compounding
+    log_target: true              # model log-differences, not the level
+    params:
+      n_estimators: 400
+      max_depth: 3
+      learning_rate: 0.03
+      subsample: 0.8
+      colsample_bytree: 0.8
+      min_child_weight: 10
+      reg_lambda: 2.0
+      objective: "reg:squarederror"
+      n_jobs: 4
+      random_state: 42
+
+  prophet:
+    growth: linear
+    yearly_seasonality: true
+    weekly_seasonality: true
+    daily_seasonality: false
+    changepoint_prior_scale: 0.05
+    seasonality_prior_scale: 5.0
+    interval_width: 0.90
+    refit_every: 21             # business days between refits during a backtest (fair to Prophet)
+    max_history: 1000           # trailing window per fit (runtime vs shape of the series)
+    regressors: []
+
+# -----------------------------------------------------------------------------
+# Backtesting (Phase 9) — expanding window, strictly chronological.
+# Each split is: [ train | calibration | test ], in time order.
+# -----------------------------------------------------------------------------
+backtesting:
+  scheme: expanding               # expanding | rolling
+  initial_train_size: 750         # business days (~3 years)
+  calibration_size: 250           # held-out block for the conformal quantile
+  test_size: 21                   # one month of out-of-sample dates per split
+  step_size: 21
+  n_splits: 12
+  gap: 0
+
+# -----------------------------------------------------------------------------
+# Conformal prediction (Phase 10)
+# -----------------------------------------------------------------------------
+conformal:
+  method: split                   # split | normalized
+  confidence_levels: [0.80, 0.90, 0.95]
+  primary_level: 0.90
+  normalize_by_volatility: true   # locally adaptive: scale residuals by recent vol
+  volatility_window: 21
+  min_calibration_size: 50
+
+# -----------------------------------------------------------------------------
+# Evaluation (Phases 11 & 16)
+# -----------------------------------------------------------------------------
+evaluation:
+  point_metrics: [mae, rmse, mape, smape]
+  interval_metrics: [coverage, mean_interval_width, pinball_loss, winkler_score, crps]
+  volatility_regimes:
+    window: 30
+    quantiles: [0.33, 0.66]
+    labels: [low, normal, high]
+
+# -----------------------------------------------------------------------------
+# Production pipeline (Phases 12-14)
+#
+# The dashboard and the API need a forecast for EVERY step from 1 to
+# `max_horizon`, not only the three headline horizons.  The direct strategy
+# means one model per step: 30 small XGBoost models per target, ~1s each.
+# -----------------------------------------------------------------------------
+pipeline:
+  model: xgboost                # production point forecaster
+  max_horizon: 30               # produce a daily path out to this many business days
+  calibration_size: 250         # most recent block reserved for the conformal quantile
+  adaptive_conformal: false     # ACI is evaluated in the backtest, not served
+  artifacts_dir: models
+
+# -----------------------------------------------------------------------------
+# Experiment tracking
+# -----------------------------------------------------------------------------
+mlflow:
+  tracking_uri: ${MLFLOW_TRACKING_URI}
+  experiment_name: ${MLFLOW_EXPERIMENT_NAME}
+  log_artifacts: true
+  register_models: false

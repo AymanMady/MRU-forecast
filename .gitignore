@@ -1,0 +1,69 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+/build/
+/dist/
+.venv/
+venv/
+.python-version
+
+# ---- Environment / secrets ----
+.env
+.env.local
+*.key
+*.pem
+
+# ---- Data (never commit raw or derived data) ----
+data/raw/*
+data/interim/*
+data/processed/*
+data/external/*
+!data/**/.gitkeep
+!data/**/README.md
+
+# ---- Models & experiment tracking ----
+/mlruns/
+/mlflow.db
+/mlartifacts/
+/models/
+*.pkl
+*.joblib
+*.json.model
+
+# ---- Derived reports ----
+# Backtest predictions and metric tables are rebuilt by `scripts/backtest.py`.
+# The headline numbers live in README.md, which IS version-controlled.
+/reports/*
+!/reports/.gitkeep
+
+# ---- Generated figures ----
+# Rebuilt by `scripts/run_eda.py`; ~140 KB each, so they are not tracked.
+docs/figures/*
+!docs/figures/.gitkeep
+
+# ---- Notebooks ----
+.ipynb_checkpoints/
+notebooks/*-checkpoint.ipynb
+
+# ---- Testing / tooling caches ----
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+
+# ---- Streamlit ----
+.streamlit/secrets.toml
+
+# ---- OS / editors ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ---- Docker ----
+docker-compose.override.yml
